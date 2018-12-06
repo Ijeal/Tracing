@@ -78,54 +78,60 @@ public class TracingFilter  implements Filter {
 
 	@Override
 	public Result invoke(Invoker<?> invoker, Invocation invocation) throws RpcException {
-		RpcContext rpcContext = RpcContext.getContext();
-		Span.Kind kind = rpcContext.isProviderSide() ? Span.Kind.SERVER : Span.Kind.CLIENT;
-		final Span span;
-		if (kind.equals(Span.Kind.CLIENT)) {
-			span = tracer.nextSpan();
-			injector.inject(span.context(), invocation.getAttachments());
-		} else {
-			TraceContextOrSamplingFlags extracted = extractor.extract(invocation.getAttachments());
-			span = extracted.context() != null ? tracer.joinSpan(extracted.context()) : tracer.nextSpan(extracted);
-		}
+	    if (invoker.getUrl().hasParameter(Constants.MONITOR_KEY)) {
+	        log.info(invoker.getUrl().toFullString());
+	        RpcContext rpcContext = RpcContext.getContext();
+	        Span.Kind kind = rpcContext.isProviderSide() ? Span.Kind.SERVER : Span.Kind.CLIENT;
+	        final Span span;
+	        if (kind.equals(Span.Kind.CLIENT)) {
+	            span = tracer.nextSpan();
+	            injector.inject(span.context(), invocation.getAttachments());
+	        } else {
+	            TraceContextOrSamplingFlags extracted = extractor.extract(invocation.getAttachments());
+	            span = extracted.context() != null ? tracer.joinSpan(extracted.context()) : tracer.nextSpan(extracted);
+	        }
 
-		if (!span.isNoop()) {
-			span.kind(kind).start();
-			String service = invoker.getInterface().getSimpleName();
-			String method = RpcUtils.getMethodName(invocation);
-			span.kind(kind);
-			span.name(service + "/" + method);
-			InetSocketAddress remoteAddress = rpcContext.getRemoteAddress();
-			span.remoteIpAndPort(
-					remoteAddress.getAddress() != null ? remoteAddress.getAddress().getHostAddress() : remoteAddress.getHostName(),remoteAddress.getPort());
-		}
+	        if (!span.isNoop()) {
+	            span.kind(kind).start();
+	            String service = invoker.getInterface().getSimpleName();
+	            String method = RpcUtils.getMethodName(invocation);
+	            span.kind(kind);
+	            span.name(service + "/" + method);
+	            InetSocketAddress remoteAddress = rpcContext.getRemoteAddress();
+	            span.remoteIpAndPort(
+	                    remoteAddress.getAddress() != null ? remoteAddress.getAddress().getHostAddress() : remoteAddress.getHostName(),remoteAddress.getPort());
+	        }
 
-		boolean isOneway = false, deferFinish = false;
-		try (Tracer.SpanInScope scope = tracer.withSpanInScope(span)){
-			collectArguments(invocation, span, kind);
-			Result result = invoker.invoke(invocation);
+	        boolean isOneway = false, deferFinish = false;
+	        try (Tracer.SpanInScope scope = tracer.withSpanInScope(span)){
+	            collectArguments(invocation, span, kind);
+	            Result result = invoker.invoke(invocation);
 
-			if (result.hasException()) {
-				onError(result.getException(), span);
-			}
-			isOneway = RpcUtils.isOneway(invoker.getUrl(), invocation);
+	            if (result.hasException()) {
+	                onError(result.getException(), span);
+	            }
+	            isOneway = RpcUtils.isOneway(invoker.getUrl(), invocation);
 
-			Future<Object> future = rpcContext.getFuture();
-			if (future instanceof FutureAdapter) {
-				deferFinish = true;
-				((FutureAdapter) future).getFuture().setCallback(new FinishSpanCallback(span));
-			}
-			return result;
-		} catch (Error | RuntimeException e) {
-			onError(e, span);
-			throw e;
-		} finally {
-			if (isOneway) {
-				span.flush();
-			} else if (!deferFinish) {
-				span.finish();
-			}
-		}
+	            Future<Object> future = rpcContext.getFuture();
+	            if (future instanceof FutureAdapter) {
+	                deferFinish = true;
+	                ((FutureAdapter) future).getFuture().setCallback(new FinishSpanCallback(span));
+	            }
+	            return result;
+	        } catch (Error | RuntimeException e) {
+	            onError(e, span);
+	            throw e;
+	        } finally {
+	            if (isOneway) {
+	                span.flush();
+	            } else if (!deferFinish) {
+	                span.finish();
+	            }
+	        }
+	    } else {
+            return invoker.invoke(invocation);
+        }
+
 	}
 
 	static void onError(Throwable error, Span span) {
