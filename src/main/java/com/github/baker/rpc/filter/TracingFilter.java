@@ -83,7 +83,7 @@ public class TracingFilter implements Filter {
 	@Override
 	public Result invoke(Invoker<?> invoker, Invocation invocation) throws RpcException {
 		if (invoker.getUrl().hasParameter(Constants.MONITOR_KEY)) {
-			log.info(invoker.getUrl().toFullString());
+			log.debug(invoker.getUrl().toFullString());
 			RpcContext rpcContext = RpcContext.getContext();
 			Span.Kind kind = rpcContext.isProviderSide() ? Span.Kind.SERVER : Span.Kind.CLIENT;
 			final Span span;
