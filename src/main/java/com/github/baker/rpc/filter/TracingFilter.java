@@ -11,6 +11,7 @@ import com.alibaba.dubbo.common.extension.Activate;
 import com.alibaba.dubbo.common.json.JSON;
 import com.alibaba.dubbo.common.logger.Logger;
 import com.alibaba.dubbo.common.logger.LoggerFactory;
+import com.alibaba.dubbo.common.utils.StringUtils;
 import com.alibaba.dubbo.remoting.exchange.ResponseCallback;
 import com.alibaba.dubbo.rpc.Filter;
 import com.alibaba.dubbo.rpc.Invocation;
@@ -82,50 +83,68 @@ public class TracingFilter implements Filter {
 
 	@Override
 	public Result invoke(Invoker<?> invoker, Invocation invocation) throws RpcException {
-		if (invoker.getUrl().hasParameter(Constants.MONITOR_KEY)) {
-			log.debug(invoker.getUrl().toFullString());
-			RpcContext rpcContext = RpcContext.getContext();
-			Span.Kind kind = rpcContext.isProviderSide() ? Span.Kind.SERVER : Span.Kind.CLIENT;
-			final Span span;
-			if (kind.equals(Span.Kind.CLIENT)) {
-				span = tracer.nextSpan();
-				injector.inject(span.context(), invocation.getAttachments());
-			} else {
-				TraceContextOrSamplingFlags extracted = extractor.extract(invocation.getAttachments());
-				span = extracted.context() != null ? tracer.joinSpan(extracted.context()) : tracer.nextSpan(extracted);
-			}
-			String spanName = "";
-			if (!span.isNoop()) {
-				span.kind(kind).start();
-				String service = invoker.getInterface().getSimpleName();
-				String method = RpcUtils.getMethodName(invocation);
-				span.kind(kind);
-				span.name(service + "/" + method);
-				spanName = service + "/" + method;
-				InetSocketAddress remoteAddress = rpcContext.getRemoteAddress();
-				span.remoteIpAndPort(remoteAddress.getAddress() != null ? remoteAddress.getAddress().getHostAddress()
-						: remoteAddress.getHostName(), remoteAddress.getPort());
+		log.debug(invoker.getUrl().toFullString());
+		if (invoker.getUrl().hasParameter(Constants.MONITOR_KEY)) {			
+			RpcContext rpcContext = null;
+			Span.Kind kind = null;
+			Span span = null;
+			String spanName = null;
+			try {
+				rpcContext = RpcContext.getContext();
+				kind = rpcContext.isProviderSide() ? Span.Kind.SERVER : Span.Kind.CLIENT;
+				if (kind.equals(Span.Kind.CLIENT)) {
+					span = tracer.nextSpan();
+					injector.inject(span.context(), invocation.getAttachments());
+				} else {
+					TraceContextOrSamplingFlags extracted = extractor.extract(invocation.getAttachments());
+					span = extracted.context() != null ? tracer.joinSpan(extracted.context()) : tracer.nextSpan(extracted);
+				}
+				spanName = "";
+				if (!span.isNoop()) {
+					span.kind(kind).start();
+					String service = invoker.getInterface().getSimpleName();
+					String method = RpcUtils.getMethodName(invocation);
+					span.kind(kind);
+					span.name(service + "/" + method);
+					spanName = service + "/" + method;
+					InetSocketAddress remoteAddress = rpcContext.getRemoteAddress();
+					span.remoteIpAndPort(remoteAddress.getAddress() != null ? remoteAddress.getAddress().getHostAddress()
+							: remoteAddress.getHostName(), remoteAddress.getPort());
+				}
+			} catch (Exception e1) {
+				log.error(e1.getMessage());
 			}
 
 			boolean isOneway = false, deferFinish = false;
 			try (Tracer.SpanInScope scope = tracer.withSpanInScope(span)) {
-				String txCode = collectArguments(invocation, span, kind, spanName);
+				String txCode = "";
+				try {
+					txCode = collectArguments(invocation, span, kind, spanName);
+				} catch (Exception e) {
+					log.error(e.getMessage());
+				}
+				
 				Result result = invoker.invoke(invocation);
-				String error = getBizErrorCodeAndMsgresult(result);
-				if (error != null && error.length() > 0) {
-					span.tag("error", error+",txCode="+txCode);
-					
-				}
+				
+				try {
+					String error = getBizErrorCodeAndMsgresult(result);
+					if (error != null && error.length() > 0) {
+						span.tag("error", error+",txCode="+txCode);
+						
+					}
 
-				if (result.hasException()) {
-					onError(result.getException(), span);
-				}
-				isOneway = RpcUtils.isOneway(invoker.getUrl(), invocation);
+					if (result.hasException()) {
+						onError(result.getException(), span);
+					}
+					isOneway = RpcUtils.isOneway(invoker.getUrl(), invocation);
 
-				Future<Object> future = rpcContext.getFuture();
-				if (future instanceof FutureAdapter) {
-					deferFinish = true;
-					((FutureAdapter) future).getFuture().setCallback(new FinishSpanCallback(span));
+					Future<Object> future = rpcContext.getFuture();
+					if (future instanceof FutureAdapter) {
+						deferFinish = true;
+						((FutureAdapter) future).getFuture().setCallback(new FinishSpanCallback(span));
+					}
+				} catch (Exception e) {
+					log.error(e.getMessage());
 				}
 				return result;
 			} catch (Error | RuntimeException e) {
@@ -166,8 +185,12 @@ public class TracingFilter implements Filter {
 			span.tag("args", fqcn.toString());
 		}
 		String txCode = getTxCode(args);
-		span.name(spanName + "/" + txCode);
-		span.tag("txCode", txCode);
+		log.debug("txCode="+txCode);
+		if(!StringUtils.isBlank(txCode)){
+			span.name(spanName + "/" + txCode);
+			span.tag("txCode", txCode);
+		}
+
 		return txCode;
 	}
 
@@ -176,9 +199,11 @@ public class TracingFilter implements Filter {
 			for (Object arg : args) {
 				Class clazz = arg.getClass();
 				if (clazz.getName().contains("ReqHead")) {
+					log.debug("clazz.getName()="+clazz.getName());
 					Field[] fields = clazz.getDeclaredFields();
 					for (Field field : fields) {
 						String name = field.getName();
+						log.debug("field="+field);
 						if (name.equalsIgnoreCase("txCode")) {
 							field.setAccessible(true);
 							try {
@@ -194,7 +219,7 @@ public class TracingFilter implements Filter {
 		} catch (Exception e) {
 			log.debug("Can't get txCode," + e.getMessage());
 		}
-		return null;
+		return "";
 	}
 
 	static String getBizErrorCodeAndMsgresult(Result result) {
